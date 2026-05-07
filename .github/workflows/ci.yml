@@ -6,10 +6,10 @@ on:
   schedule:
     - cron: '30 22 * * *'  # Daily at 4:00 AM IST (UTC+5:30)
 
-# Cancel in-progress runs for the same ref when a new commit is pushed
+# Cancel superseded runs on PRs/branches; let all main branch runs complete
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 # Least-privilege: jobs only need to read the repo
 permissions:
