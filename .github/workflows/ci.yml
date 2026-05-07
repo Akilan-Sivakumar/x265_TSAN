@@ -83,14 +83,15 @@ jobs:
         with:
           name: x265-8bit
           path: build/8bit/x265
-          retention-days: 7
+          retention-days: 3
 
       - name: Upload library artifacts
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: lib-8bit
           path: build/8bit/libx265.a
-          retention-days: 7
+          retention-days: 3
 
   build-10bit:
     name: "Build 10-bit"
@@ -141,7 +142,7 @@ jobs:
         with:
           name: x265-10bit
           path: build/10bit/x265
-          retention-days: 7
+          retention-days: 3
 
   build-12bit:
     name: "Build 12-bit"
@@ -193,7 +194,7 @@ jobs:
         with:
           name: x265-12bit
           path: build/12bit/x265
-          retention-days: 7
+          retention-days: 3
 
   build-multilib:
     name: "Build Multi-lib (8+10+12 bit)"
@@ -275,6 +276,7 @@ jobs:
           ./x265 --version
 
       - name: Upload artifacts
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: x265-multilib
@@ -282,7 +284,7 @@ jobs:
             build/multilib/8bit/x265
             build/multilib/8bit/libx265.so*
             build/multilib/8bit/libx265.a
-          retention-days: 7
+          retention-days: 3
 
   # ───────────────────────────────────────────────────────────────────────────
   # Phase 2 – Tests (parallel; each depends only on the binary it needs)
@@ -381,12 +383,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-cli-presets
           path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
   test-rate-control:
     name: "Test Rate Control Modes"
@@ -472,17 +474,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-rate-control
           path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
   test-encoding-features:
     name: "Test Encoding Features"
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     needs: build-8bit
     steps:
       - name: Download 8-bit binary
@@ -564,6 +566,30 @@ jobs:
           run_x265 "422 Input"         $X265 --preset medium --crf 28 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_422_416x240.yuv || FAIL=$((FAIL+1))
           run_x265 "444 Input"         $X265 --preset medium --crf 28 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_444_416x240.yuv || FAIL=$((FAIL+1))
           rm -f /tmp/out.hevc
+
+          # ── Quality Metrics ──
+          run_x265 "SSIM Metric"   $X265 --preset medium --ssim        --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
+          grep -qi "ssim" /tmp/x265_last.log || { echo "FAIL: ssim not reported"; FAIL=$((FAIL+1)); }
+          run_x265 "PSNR Metric"   $X265 --preset medium --psnr        --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
+          grep -qi "psnr" /tmp/x265_last.log || { echo "FAIL: psnr not reported"; FAIL=$((FAIL+1)); }
+          run_x265 "SSIM + PSNR"  $X265 --preset medium --ssim --psnr --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
+          run_x265 "Hash (MD5)"   $X265 --preset medium --hash 1      --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
+          run_x265 "Recon Output" $X265 --preset medium               --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc -r /tmp/recon.yuv testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
+          test -f /tmp/recon.yuv && echo "Recon file created OK" || { echo "FAIL: recon file missing"; FAIL=$((FAIL+1)); }
+          rm -f /tmp/out.hevc /tmp/recon.yuv
+
+          # ── MCSTF, SBRC & Interlace ──
+          ffmpeg -y -f lavfi -i testsrc=duration=3:size=1920x1080:rate=25 -pix_fmt yuv420p testdata/test_420_1080p.yuv
+          run_x265 "MCSTF slower"          $X265 --preset slower    --crf 24 --mcstf --bframes 5 --frame-threads 1 --no-cutree --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          run_x265 "MCSTF medium"          $X265 --preset medium    --crf 26 --mcstf --bframes 5 --frame-threads 1 --tskip-fast --constrained-intra --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          run_x265 "MCSTF slow"            $X265 --preset slow      --crf 24 --mcstf --bframes 5 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          run_x265 "SBRC slow"             $X265 --preset slow      --crf 26 --sbrc --no-open-gop --keyint 60 --min-keyint 60 --vbv-bufsize 6000 --vbv-maxrate 5000 --temporal-layers 4 --b-adapt 0 --no-cutree --input-res 1920x1080 --fps 25 --frames 50 -o /tmp/out.hevc testdata/test_420_1080p.yuv || FAIL=$((FAIL+1))
+          run_x265 "SBRC superfast"        $X265 --preset superfast --crf 22 --sbrc --no-open-gop --vbv-maxrate 9000 --vbv-bufsize 7500 --keyint 100 --min-keyint 100 --input-res 1920x1080 --fps 25 --frames 50 -o /tmp/out.hevc testdata/test_420_1080p.yuv || FAIL=$((FAIL+1))
+          run_x265 "Interlace TFF"         $X265 --preset faster    --interlace tff --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          run_x265 "Interlace BFF"         $X265 --preset fast      --interlace bff --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          run_x265 "Interlace BFF+weightb" $X265 --preset fast      --interlace bff --weightb --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
+          rm -f /tmp/out.hevc
+
           echo ""
           echo "==================== ENCODING SUMMARY ===================="
           cat /tmp/summary.log 2>/dev/null || true
@@ -598,12 +624,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-encoding-features
           path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
   test-analysis-save-load:
     name: "Test Analysis Save/Load & Segment Encoding"
@@ -684,17 +710,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-analysis-save-load
           path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
-  test-bitstream-validation:
-    name: "Test Bitstream Validation (decode output)"
+  test-video-and-validation:
+    name: "Test Real-World Video & Bitstream Validation"
     runs-on: ubuntu-22.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     needs: build-8bit
     steps:
       - name: Download 8-bit binary
@@ -711,16 +737,41 @@ jobs:
           restore-keys: apt-test-${{ runner.os }}-
 
       - name: Install runtime dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnuma1 ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnuma1 ffmpeg wget
+
+      - name: Cache xiph.org test videos
+        id: cache-videos
+        uses: actions/cache@v4
+        with:
+          path: testdata
+          key: xiph-test-videos-v1
+
+      - name: Download test videos (cache miss only)
+        if: steps.cache-videos.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p testdata
+          wget -q --tries=3 --timeout=60 -O testdata/bus_cif.y4m   https://media.xiph.org/video/derf/y4m/bus_cif.y4m
+          wget -q --tries=3 --timeout=60 -O testdata/akiyo_cif.y4m https://media.xiph.org/video/derf/y4m/akiyo_cif.y4m
 
       - name: Run tests
         run: |
           chmod +x dist/x265
           X265=$(pwd)/dist/x265
-          mkdir -p testdata
+          mkdir -p testdata artifacts
           ffmpeg -y -f lavfi -i testsrc=duration=2:size=416x240:rate=30 -pix_fmt yuv420p testdata/test_420_416x240.yuv
           FAIL=0
           echo "" > /tmp/summary.log
+          run_x265() {
+            local label="$1"; shift
+            echo "=== $label ==="
+            "$@" 2>&1 | tee /tmp/x265_last.log
+            local rc=${PIPESTATUS[0]}
+            local summary=$(grep "encoded" /tmp/x265_last.log | tail -1)
+            [ -n "$summary" ] && printf "  %-45s | %s\n" "$label" "$summary" >> /tmp/summary.log
+            return $rc
+          }
+
+          # ── Bitstream Validation ──
           validate_encode() {
             local label="$1"; shift
             echo "=== $label ==="
@@ -753,19 +804,40 @@ jobs:
           validate_encode "HRD compliant" --preset medium   --bitrate 500 --vbv-maxrate 500 --vbv-bufsize 500 --hrd --aud --repeat-headers -F4 --input-res 416x240 --fps 30 --frames 30
           validate_encode "Closed GOP"    --preset medium   --no-open-gop --keyint 10 --crf 28 --input-res 416x240 --fps 30 --frames 30
           validate_encode "Zero-latency"  --preset medium   --tune zerolatency --crf 28 --input-res 416x240 --fps 30 --frames 30
+
+          # ── Real-World Video (Y4M) ──
+          run_x265 "bus ultrafast CRF 28"     $X265 --preset ultrafast --crf 28 --ssim --psnr --frames 150 -o artifacts/bus_ultrafast_crf28.hevc     testdata/bus_cif.y4m   || FAIL=$((FAIL+1))
+          run_x265 "bus medium CRF 22"        $X265 --preset medium   --crf 22 --ssim --psnr --frames 150 -o artifacts/bus_medium_crf22.hevc         testdata/bus_cif.y4m   || FAIL=$((FAIL+1))
+          run_x265 "bus slow ABR 1000k"       $X265 --preset slow     --bitrate 1000 --vbv-maxrate 1500 --vbv-bufsize 2000 -F4 --ssim --psnr --frames 150 -o artifacts/bus_slow_abr1000k.hevc testdata/bus_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "bus veryslow tune grain"  $X265 --preset veryslow --tune grain --crf 20 --ssim --psnr --frames 150 -o artifacts/bus_veryslow_grain.hevc testdata/bus_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "akiyo medium CRF 22"      $X265 --preset medium   --crf 22 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_crf22.hevc       testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "akiyo slow VBV 500k CBR"  $X265 --preset slow     --bitrate 500 --vbv-maxrate 500 --vbv-bufsize 500 --strict-cbr -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_slow_vbv500k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "akiyo veryslow CRF 18"    $X265 --preset veryslow --crf 18 --ssim --psnr --frames 300 -o artifacts/akiyo_veryslow_crf18.hevc     testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "akiyo 2-pass pass1"       $X265 --preset medium   --bitrate 400 --pass 1 -F4 --frames 300 -o /dev/null                          testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
+          run_x265 "akiyo 2-pass pass2"       $X265 --preset medium   --bitrate 400 --pass 2 -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_2pass_400k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
+          echo "=== Validate HEVC artifacts with ffprobe ==="
+          for f in artifacts/*.hevc; do
+            if ffprobe -v error -show_entries stream=codec_name "$f" 2>&1 | grep -q hevc; then
+              echo "PASS: $f is valid HEVC"
+            else
+              echo "FAIL: $f is NOT valid HEVC"; FAIL=$((FAIL+1))
+            fi
+          done
+          rm -f x265_2pass.log x265_2pass.log.cutree
+
           echo ""
           echo "==================== ENCODING SUMMARY ===================="
           cat /tmp/summary.log 2>/dev/null || true
           echo "=========================================================="
-          echo "=== Bitstream Validation Results FAIL=$FAIL ==="
-          mkdir -p summaries && cp /tmp/summary.log summaries/bitstream-validation.log 2>/dev/null || true
+          echo "=== Video & Validation Results FAIL=$FAIL ==="
+          mkdir -p summaries && cp /tmp/summary.log summaries/video-and-validation.log 2>/dev/null || true
           test $FAIL -eq 0
 
       - name: Write step summary
         if: always()
         run: |
           {
-            echo "## Bitstream Validation"
+            echo "## Real-World Video & Bitstream Validation"
             echo ""
             echo "| Test | Frames | FPS | Bitrate (kb/s) | Avg QP |"
             echo "|------|-------:|----:|---------------:|-------:|"
@@ -786,13 +858,22 @@ jobs:
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload summaries
-        if: always()
+      - name: Upload HEVC artifacts
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
-          name: summaries-bitstream-validation
+          name: hevc-realworld
+          path: artifacts/*.hevc
+          retention-days: 3
+
+      - name: Upload summaries
+        if: always() && github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: summaries-video-and-validation
           path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
+
 
   test-threading:
     name: "Test Threading & Parallelism"
@@ -877,222 +958,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-threading
           path: summaries/*.log
-          retention-days: 7
-
-  test-quality-metrics:
-    name: "Test Quality Metrics (SSIM/PSNR)"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 15
-    needs: build-8bit
-    steps:
-      - name: Download 8-bit binary
-        uses: actions/download-artifact@v4
-        with:
-          name: x265-8bit
-          path: dist
-
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-test-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: apt-test-${{ runner.os }}-
-
-      - name: Install runtime dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnuma1 ffmpeg
-
-      - name: Run tests
-        run: |
-          chmod +x dist/x265
-          X265=$(pwd)/dist/x265
-          mkdir -p testdata
-          ffmpeg -y -f lavfi -i testsrc=duration=2:size=416x240:rate=30 -pix_fmt yuv420p testdata/test_420_416x240.yuv
-          FAIL=0
-          run_x265() {
-            local label="$1"; shift
-            echo "=== $label ==="
-            "$@" 2>&1 | tee /tmp/x265_last.log
-            local rc=${PIPESTATUS[0]}
-            local summary=$(grep "encoded" /tmp/x265_last.log | tail -1)
-            [ -n "$summary" ] && printf "  %-45s | %s\n" "$label" "$summary" >> /tmp/summary.log
-            return $rc
-          }
-          echo "" > /tmp/summary.log
-          run_x265 "SSIM Metric"  $X265 --preset medium --ssim        --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          grep -qi "ssim" /tmp/x265_last.log || { echo "FAIL: ssim not reported"; FAIL=$((FAIL+1)); }
-          run_x265 "PSNR Metric"  $X265 --preset medium --psnr        --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          grep -qi "psnr" /tmp/x265_last.log || { echo "FAIL: psnr not reported"; FAIL=$((FAIL+1)); }
-          run_x265 "SSIM + PSNR"  $X265 --preset medium --ssim --psnr --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          grep -qi "ssim" /tmp/x265_last.log || { echo "FAIL: ssim not reported"; FAIL=$((FAIL+1)); }
-          grep -qi "psnr" /tmp/x265_last.log || { echo "FAIL: psnr not reported"; FAIL=$((FAIL+1)); }
-          run_x265 "Hash (MD5)"   $X265 --preset medium --hash 1      --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          run_x265 "Recon Output" $X265 --preset medium               --crf 22 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc -r /tmp/recon.yuv testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          test -f /tmp/recon.yuv && echo "Recon file created OK" || { echo "FAIL: recon file missing"; FAIL=$((FAIL+1)); }
-          rm -f /tmp/out.hevc /tmp/recon.yuv
-          echo ""
-          echo "==================== ENCODING SUMMARY ===================="
-          cat /tmp/summary.log 2>/dev/null || true
-          echo "=========================================================="
-          echo "=== Quality Metrics Results FAIL=$FAIL ==="
-          mkdir -p summaries && cp /tmp/summary.log summaries/quality-metrics.log 2>/dev/null || true
-          test $FAIL -eq 0
-
-      - name: Write step summary
-        if: always()
-        run: |
-          {
-            echo "## Quality Metrics (SSIM / PSNR)"
-            echo ""
-            echo "| Test | Frames | FPS | Bitrate (kb/s) | Avg QP |"
-            echo "|------|-------:|----:|---------------:|-------:|"
-            if [ -f /tmp/summary.log ] && grep -qv '^[[:space:]]*$' /tmp/summary.log 2>/dev/null; then
-              while IFS= read -r line; do
-                [ -z "${line//[[:space:]]/}" ] && continue
-                label=$(echo "$line" | sed 's/^ *//' | cut -d'|' -f1 | sed 's/ *$//')
-                rest=$(echo "$line" | cut -d'|' -f2-)
-                frames=$(echo "$rest" | grep -oP 'encoded \K\d+' || true)
-                fps=$(echo "$rest" | grep -oP '\(\K[\d.]+(?= fps\))' || true)
-                bitrate=$(echo "$rest" | grep -oP '[\d.]+(?= kb/s)' || true)
-                qp=$(echo "$rest" | grep -oP 'Avg QP:\K[\d.]+' || true)
-                echo "| \`${label:-?}\` | ${frames:--} | ${fps:--} | ${bitrate:--} | ${qp:--} |"
-              done < /tmp/summary.log
-            else
-              echo "| _no data_ | | | | |"
-            fi
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload summaries
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: summaries-quality-metrics
-          path: summaries/*.log
-          retention-days: 7
-
-  test-realworld-video:
-    name: "Test Real-World Video (Y4M + Artifacts)"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    needs: build-8bit
-    steps:
-      - name: Download 8-bit binary
-        uses: actions/download-artifact@v4
-        with:
-          name: x265-8bit
-          path: dist
-
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-test-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: apt-test-${{ runner.os }}-
-
-      - name: Install runtime dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnuma1 ffmpeg wget
-
-      - name: Cache xiph.org test videos
-        id: cache-videos
-        uses: actions/cache@v4
-        with:
-          path: testdata
-          key: xiph-test-videos-v1
-
-      - name: Download test videos (cache miss only)
-        if: steps.cache-videos.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p testdata
-          wget -q --tries=3 --timeout=60 -O testdata/bus_cif.y4m   https://media.xiph.org/video/derf/y4m/bus_cif.y4m
-          wget -q --tries=3 --timeout=60 -O testdata/akiyo_cif.y4m https://media.xiph.org/video/derf/y4m/akiyo_cif.y4m
-
-      - name: Run tests
-        run: |
-          chmod +x dist/x265
-          X265=$(pwd)/dist/x265
-          mkdir -p artifacts
-          FAIL=0
-          run_x265() {
-            local label="$1"; shift
-            echo "=== $label ==="
-            "$@" 2>&1 | tee /tmp/x265_last.log
-            local rc=${PIPESTATUS[0]}
-            local summary=$(grep "encoded" /tmp/x265_last.log | tail -1)
-            [ -n "$summary" ] && printf "  %-45s | %s\n" "$label" "$summary" >> /tmp/summary.log
-            return $rc
-          }
-          echo "" > /tmp/summary.log
-          run_x265 "bus ultrafast CRF 28"     $X265 --preset ultrafast --crf 28 --ssim --psnr --frames 150 -o artifacts/bus_ultrafast_crf28.hevc     testdata/bus_cif.y4m   || FAIL=$((FAIL+1))
-          run_x265 "bus medium CRF 22"        $X265 --preset medium   --crf 22 --ssim --psnr --frames 150 -o artifacts/bus_medium_crf22.hevc         testdata/bus_cif.y4m   || FAIL=$((FAIL+1))
-          run_x265 "bus slow ABR 1000k"       $X265 --preset slow     --bitrate 1000 --vbv-maxrate 1500 --vbv-bufsize 2000 -F4 --ssim --psnr --frames 150 -o artifacts/bus_slow_abr1000k.hevc testdata/bus_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "bus veryslow tune grain"  $X265 --preset veryslow --tune grain --crf 20 --ssim --psnr --frames 150 -o artifacts/bus_veryslow_grain.hevc testdata/bus_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo medium CRF 22"      $X265 --preset medium   --crf 22 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_crf22.hevc       testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo slow VBV 500k CBR"  $X265 --preset slow     --bitrate 500 --vbv-maxrate 500 --vbv-bufsize 500 --strict-cbr -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_slow_vbv500k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo veryslow CRF 18"    $X265 --preset veryslow --crf 18 --ssim --psnr --frames 300 -o artifacts/akiyo_veryslow_crf18.hevc     testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo 2-pass pass1"       $X265 --preset medium   --bitrate 400 --pass 1 -F4 --frames 300 -o /dev/null                          testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo 2-pass pass2"       $X265 --preset medium   --bitrate 400 --pass 2 -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_2pass_400k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          echo "=== Validate artifacts with ffprobe ==="
-          for f in artifacts/*.hevc; do
-            if ffprobe -v error -show_entries stream=codec_name "$f" 2>&1 | grep -q hevc; then
-              echo "PASS: $f is valid HEVC"
-            else
-              echo "FAIL: $f is NOT valid HEVC"; FAIL=$((FAIL+1))
-            fi
-          done
-          rm -f x265_2pass.log x265_2pass.log.cutree
-          echo ""
-          echo "==================== ENCODING SUMMARY ===================="
-          cat /tmp/summary.log 2>/dev/null || true
-          echo "=========================================================="
-          echo "=== Real-World Video Results FAIL=$FAIL ==="
-          mkdir -p summaries && cp /tmp/summary.log summaries/realworld-video.log 2>/dev/null || true
-          test $FAIL -eq 0
-
-      - name: Write step summary
-        if: always()
-        run: |
-          {
-            echo "## Real-World Video (Y4M)"
-            echo ""
-            echo "| Test | Frames | FPS | Bitrate (kb/s) | Avg QP |"
-            echo "|------|-------:|----:|---------------:|-------:|"
-            if [ -f /tmp/summary.log ] && grep -qv '^[[:space:]]*$' /tmp/summary.log 2>/dev/null; then
-              while IFS= read -r line; do
-                [ -z "${line//[[:space:]]/}" ] && continue
-                label=$(echo "$line" | sed 's/^ *//' | cut -d'|' -f1 | sed 's/ *$//')
-                rest=$(echo "$line" | cut -d'|' -f2-)
-                frames=$(echo "$rest" | grep -oP 'encoded \K\d+' || true)
-                fps=$(echo "$rest" | grep -oP '\(\K[\d.]+(?= fps\))' || true)
-                bitrate=$(echo "$rest" | grep -oP '[\d.]+(?= kb/s)' || true)
-                qp=$(echo "$rest" | grep -oP 'Avg QP:\K[\d.]+' || true)
-                echo "| \`${label:-?}\` | ${frames:--} | ${fps:--} | ${bitrate:--} | ${qp:--} |"
-              done < /tmp/summary.log
-            else
-              echo "| _no data_ | | | | |"
-            fi
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload HEVC artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: hevc-realworld
-          path: artifacts/*.hevc
-          retention-days: 7
-
-      - name: Upload summaries
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: summaries-realworld-video
-          path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
   test-10bit-12bit-encoding:
     name: "Test 10-bit & 12-bit Encoding"
@@ -1193,102 +1064,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload summaries
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: summaries-10bit-12bit-encoding
           path: summaries/*.log
-          retention-days: 7
-
-  test-mcstf-sbrc-interlace:
-    name: "Test MCSTF, SBRC & Interlace"
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-    needs: build-8bit
-    steps:
-      - name: Download 8-bit binary
-        uses: actions/download-artifact@v4
-        with:
-          name: x265-8bit
-          path: dist
-
-      - name: Cache apt packages
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-test-${{ runner.os }}-${{ hashFiles('.github/workflows/ci.yml') }}
-          restore-keys: apt-test-${{ runner.os }}-
-
-      - name: Install runtime dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libnuma1 ffmpeg
-
-      - name: Run tests
-        run: |
-          chmod +x dist/x265
-          X265=$(pwd)/dist/x265
-          mkdir -p testdata
-          ffmpeg -y -f lavfi -i testsrc=duration=3:size=832x480:rate=30  -pix_fmt yuv420p testdata/test_420_832x480.yuv
-          ffmpeg -y -f lavfi -i testsrc=duration=3:size=1920x1080:rate=25 -pix_fmt yuv420p testdata/test_420_1080p.yuv
-          FAIL=0
-          run_x265() {
-            local label="$1"; shift
-            echo "=== $label ==="
-            "$@" 2>&1 | tee /tmp/x265_last.log
-            local rc=${PIPESTATUS[0]}
-            local summary=$(grep "encoded" /tmp/x265_last.log | tail -1)
-            [ -n "$summary" ] && printf "  %-45s | %s\n" "$label" "$summary" >> /tmp/summary.log
-            return $rc
-          }
-          echo "" > /tmp/summary.log
-          run_x265 "MCSTF slower"          $X265 --preset slower    --crf 24 --mcstf --bframes 5 --frame-threads 1 --no-cutree --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          run_x265 "MCSTF medium"          $X265 --preset medium    --crf 26 --mcstf --bframes 5 --frame-threads 1 --tskip-fast --constrained-intra --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          run_x265 "MCSTF slow"            $X265 --preset slow      --crf 24 --mcstf --bframes 5 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          run_x265 "SBRC slow"             $X265 --preset slow      --crf 26 --sbrc --no-open-gop --keyint 60 --min-keyint 60 --vbv-bufsize 6000 --vbv-maxrate 5000 --temporal-layers 4 --b-adapt 0 --no-cutree --input-res 1920x1080 --fps 25 --frames 50 -o /tmp/out.hevc testdata/test_420_1080p.yuv || FAIL=$((FAIL+1))
-          run_x265 "SBRC superfast"        $X265 --preset superfast --crf 22 --sbrc --no-open-gop --vbv-maxrate 9000 --vbv-bufsize 7500 --keyint 100 --min-keyint 100 --input-res 1920x1080 --fps 25 --frames 50 -o /tmp/out.hevc testdata/test_420_1080p.yuv || FAIL=$((FAIL+1))
-          run_x265 "Interlace TFF"         $X265 --preset faster    --interlace tff --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          run_x265 "Interlace BFF"         $X265 --preset fast      --interlace bff --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          run_x265 "Interlace BFF+weightb" $X265 --preset fast      --interlace bff --weightb --crf 28 --input-res 832x480 --fps 30 --frames 60 -o /tmp/out.hevc testdata/test_420_832x480.yuv || FAIL=$((FAIL+1))
-          rm -f /tmp/out.hevc
-          echo ""
-          echo "==================== ENCODING SUMMARY ===================="
-          cat /tmp/summary.log 2>/dev/null || true
-          echo "=========================================================="
-          echo "=== MCSTF/SBRC/Interlace Results FAIL=$FAIL ==="
-          mkdir -p summaries && cp /tmp/summary.log summaries/mcstf-sbrc-interlace.log 2>/dev/null || true
-          test $FAIL -eq 0
-
-      - name: Write step summary
-        if: always()
-        run: |
-          {
-            echo "## MCSTF, SBRC & Interlace"
-            echo ""
-            echo "| Test | Frames | FPS | Bitrate (kb/s) | Avg QP |"
-            echo "|------|-------:|----:|---------------:|-------:|"
-            if [ -f /tmp/summary.log ] && grep -qv '^[[:space:]]*$' /tmp/summary.log 2>/dev/null; then
-              while IFS= read -r line; do
-                [ -z "${line//[[:space:]]/}" ] && continue
-                label=$(echo "$line" | sed 's/^ *//' | cut -d'|' -f1 | sed 's/ *$//')
-                rest=$(echo "$line" | cut -d'|' -f2-)
-                frames=$(echo "$rest" | grep -oP 'encoded \K\d+' || true)
-                fps=$(echo "$rest" | grep -oP '\(\K[\d.]+(?= fps\))' || true)
-                bitrate=$(echo "$rest" | grep -oP '[\d.]+(?= kb/s)' || true)
-                qp=$(echo "$rest" | grep -oP 'Avg QP:\K[\d.]+' || true)
-                echo "| \`${label:-?}\` | ${frames:--} | ${fps:--} | ${bitrate:--} | ${qp:--} |"
-              done < /tmp/summary.log
-            else
-              echo "| _no data_ | | | | |"
-            fi
-            echo ""
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload summaries
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: summaries-mcstf-sbrc-interlace
-          path: summaries/*.log
-          retention-days: 7
+          retention-days: 3
 
   # ───────────────────────────────────────────────────────────────────────────
   # Phase 3 – Summary report
@@ -1308,12 +1089,9 @@ jobs:
       - test-rate-control
       - test-encoding-features
       - test-analysis-save-load
-      - test-bitstream-validation
+      - test-video-and-validation
       - test-threading
-      - test-quality-metrics
-      - test-realworld-video
       - test-10bit-12bit-encoding
-      - test-mcstf-sbrc-interlace
     steps:
       - name: Download all summaries
         uses: actions/download-artifact@v4
@@ -1416,19 +1194,15 @@ jobs:
           declare -A SUITE_TITLES
           SUITE_TITLES["cli-presets"]="CLI Presets & Tune Modes"
           SUITE_TITLES["rate-control"]="Rate Control Modes"
-          SUITE_TITLES["encoding-features"]="Encoding Features"
+          SUITE_TITLES["encoding-features"]="Encoding Features (incl. Quality Metrics, MCSTF/SBRC/Interlace)"
           SUITE_TITLES["analysis-save-load"]="Analysis Save/Load & Segment Encoding"
-          SUITE_TITLES["bitstream-validation"]="Bitstream Validation"
+          SUITE_TITLES["video-and-validation"]="Real-World Video & Bitstream Validation"
           SUITE_TITLES["threading"]="Threading & Parallelism"
-          SUITE_TITLES["quality-metrics"]="Quality Metrics (SSIM/PSNR)"
-          SUITE_TITLES["realworld-video"]="Real-World Video (Y4M)"
           SUITE_TITLES["10bit-12bit-encoding"]="10-bit & 12-bit Encoding"
-          SUITE_TITLES["mcstf-sbrc-interlace"]="MCSTF, SBRC & Interlace"
 
           # Fixed display order
           for suite in cli-presets rate-control encoding-features analysis-save-load \
-                       bitstream-validation threading quality-metrics realworld-video \
-                       10bit-12bit-encoding mcstf-sbrc-interlace; do
+                       video-and-validation threading 10bit-12bit-encoding; do
             f="summaries/${suite}.log"
             [ -f "$f" ] || continue
             title="${SUITE_TITLES[$suite]:-$suite}"
