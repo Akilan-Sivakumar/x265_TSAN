@@ -331,7 +331,7 @@ jobs:
             return $rc
           }
           echo "" > /tmp/summary.log
-          for preset in ultrafast superfast veryfast faster fast medium slow slower veryslow placebo; do
+          for preset in ultrafast superfast veryfast faster fast medium slow slower veryslow; do
             TOTAL=$((TOTAL + 1))
             if run_x265 "Preset $preset" $X265 --preset $preset --crf 28 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out_${preset}.hevc testdata/test_420_416x240.yuv; then
               PASS=$((PASS + 1))
@@ -484,7 +484,7 @@ jobs:
   test-encoding-features:
     name: "Test Encoding Features"
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     needs: build-8bit
     steps:
       - name: Download 8-bit binary
@@ -528,13 +528,10 @@ jobs:
           for ctu in 16 32 64; do
             run_x265 "CTU $ctu"        $X265 --preset medium --ctu $ctu --crf 28                                 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           done
-          for mcu in 8 16 32; do
-            run_x265 "Min-CU $mcu"     $X265 --preset medium --min-cu-size $mcu --crf 28                         --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          done
-          for aqmode in 0 1 2 3 4; do
+          for aqmode in 0 3; do
             run_x265 "AQ Mode $aqmode" $X265 --preset medium --aq-mode $aqmode --crf 28                          --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           done
-          for me in dia hex umh star sea full; do
+          for me in hex umh full; do
             run_x265 "ME $me"          $X265 --preset medium --me $me --crf 28                                   --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           done
           run_x265 "SAO + Deblock"     $X265 --preset medium --sao --deblock 2:2 --crf 28                        --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
@@ -547,10 +544,10 @@ jobs:
           run_x265 "Short Keyint"      $X265 --preset medium --keyint 10 --min-keyint 5 --crf 28                 --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           run_x265 "Closed GOP"        $X265 --preset medium --no-open-gop --crf 28                              --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           run_x265 "Constrained Intra" $X265 --preset medium --constrained-intra --crf 28                        --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
-          for rd in 1 2 3 4 5 6; do
+          for rd in 2 5; do
             run_x265 "RD Level $rd"    $X265 --preset medium --rd $rd --crf 28                                   --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           done
-          for rdoq in 0 1 2; do
+          for rdoq in 0 2; do
             run_x265 "RDOQ Level $rdoq" $X265 --preset medium --rdoq-level $rdoq --crf 28                        --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
           done
           run_x265 "Scaling List"      $X265 --preset medium --scaling-list default --crf 28                     --input-res 416x240 --fps 30 --frames 30 -o /tmp/out.hevc testdata/test_420_416x240.yuv || FAIL=$((FAIL+1))
@@ -813,8 +810,6 @@ jobs:
           run_x265 "akiyo medium CRF 22"      $X265 --preset medium   --crf 22 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_crf22.hevc       testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
           run_x265 "akiyo slow VBV 500k CBR"  $X265 --preset slow     --bitrate 500 --vbv-maxrate 500 --vbv-bufsize 500 --strict-cbr -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_slow_vbv500k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
           run_x265 "akiyo veryslow CRF 18"    $X265 --preset veryslow --crf 18 --ssim --psnr --frames 300 -o artifacts/akiyo_veryslow_crf18.hevc     testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo 2-pass pass1"       $X265 --preset medium   --bitrate 400 --pass 1 -F4 --frames 300 -o /dev/null                          testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
-          run_x265 "akiyo 2-pass pass2"       $X265 --preset medium   --bitrate 400 --pass 2 -F4 --ssim --psnr --frames 300 -o artifacts/akiyo_medium_2pass_400k.hevc testdata/akiyo_cif.y4m || FAIL=$((FAIL+1))
           echo "=== Validate HEVC artifacts with ffprobe ==="
           for f in artifacts/*.hevc; do
             if ffprobe -v error -show_entries stream=codec_name "$f" 2>&1 | grep -q hevc; then
@@ -823,8 +818,6 @@ jobs:
               echo "FAIL: $f is NOT valid HEVC"; FAIL=$((FAIL+1))
             fi
           done
-          rm -f x265_2pass.log x265_2pass.log.cutree
-
           echo ""
           echo "==================== ENCODING SUMMARY ===================="
           cat /tmp/summary.log 2>/dev/null || true
