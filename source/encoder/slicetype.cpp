@@ -2212,6 +2212,8 @@ void Lookahead::slicetypeDecide()
 
     if (m_param->bEnableTemporalSubLayers > 2)
     {
+        uint8_t codedFrameOrderedIndex[X265_BFRAME_MAX+1];
+
         //Split the partial mini GOP into sub mini GOPs when temporal sub layers are enabled
         if (bframes < m_param->bframes)
         {
@@ -2283,6 +2285,7 @@ void Lookahead::slicetypeDecide()
 
                     int idx = 0;
                     /* add non-B to output queue */
+                    codedFrameOrderedIndex[idx] = newbFrames;
                     list[newbFrames]->m_reorderedPts = pts[idx++];
                     list[newbFrames]->m_gopOffset = 0;
                     list[newbFrames]->m_gopId = gopId;
@@ -2302,6 +2305,7 @@ void Lookahead::slicetypeDecide()
                         list[bframes]->m_gopId = gopId;
                         list[offset]->m_tempLayer = x265_gop_ra[gopId][j++].layer;
 
+                        codedFrameOrderedIndex[idx] = offset;
                         list[offset]->m_reorderedPts = pts[idx++];
                         m_outputQueue.pushBack(*list[offset]);
                         i++;
@@ -2366,6 +2370,7 @@ void Lookahead::slicetypeDecide()
                 m_inputLock.release();
 
                 m_lastNonB = &list[newbFrames]->m_lowres;
+                codedFrameOrderedIndex[idx] = newbFrames;
                 list[newbFrames]->m_reorderedPts = pts[idx++];
                 list[newbFrames]->m_gopOffset = 0;
                 list[newbFrames]->m_gopId = -1;
@@ -2377,6 +2382,7 @@ void Lookahead::slicetypeDecide()
                     {
                         if (list[i]->m_lowres.sliceType == X265_TYPE_BREF)
                         {
+                            codedFrameOrderedIndex[idx] = i;
                             list[i]->m_reorderedPts = pts[idx++];
                             list[i]->m_gopOffset = 0;
                             list[i]->m_gopId = -1;
@@ -2392,6 +2398,7 @@ void Lookahead::slicetypeDecide()
                     /* push all the B frames into output queue except B-ref, which already pushed into output queue */
                     if (list[i]->m_lowres.sliceType != X265_TYPE_BREF)
                     {
+                        codedFrameOrderedIndex[idx] = i;
                         list[i]->m_reorderedPts = pts[idx++];
                         list[i]->m_gopOffset = 0;
                         list[i]->m_gopId = -1;
@@ -2454,6 +2461,7 @@ void Lookahead::slicetypeDecide()
 
             int idx = 0;
             /* add non-B to output queue */
+            codedFrameOrderedIndex[idx] = bframes;
             list[bframes]->m_reorderedPts = pts[idx++];
             list[bframes]->m_gopOffset = 0;
             list[bframes]->m_gopId = m_gopId;
@@ -2473,11 +2481,23 @@ void Lookahead::slicetypeDecide()
                 list[offset]->m_tempLayer = x265_gop_ra[m_gopId][j++].layer;
 
                 /* add B frames to output queue */
+                codedFrameOrderedIndex[idx] = offset;
                 list[offset]->m_reorderedPts = pts[idx++];
                 m_outputQueue.pushBack(*list[offset]);
                 i++;
             }
         }
+
+        /* Compute HRD CpbDpb delays */
+        {
+            Frame *prevFrame = NULL;
+            for (int i = 0; i <= bframes; ++i)
+            {
+                calculateDurations(list[codedFrameOrderedIndex[i]], prevFrame);
+                prevFrame = list[codedFrameOrderedIndex[i]];
+            }
+        }
+
 
         bool isKeyFrameAnalyse = (m_param->rc.cuTree || (m_param->rc.vbvBufferSize && m_param->lookaheadDepth));
         if (isKeyFrameAnalyse && IS_X265_TYPE_I(m_lastNonB->sliceType))
@@ -2627,15 +2647,12 @@ void Lookahead::slicetypeDecide()
             }
         }
 
-        // Compute HRD CpbDpb delays
+        /* Compute HRD CpbDpb delays */
         {
             Frame *prevFrame = NULL;
             for (int i = 0; i <= bframes; ++i)
             {
-                /* to keep cpb and dpb operations in sync, use the display duration of the current picture to specify the pic
-                lifetime in the cpb. Given that pulldown sequences are alternating between single-doubling or doubling-tripling,
-                the cpb lifetime "error" is limited to 1 time clock and does not accumulate on long re-ordered sequences */
-                calculateDurations(list[codedFrameOrderedIndex[i]], prevFrame, list[i]->m_duration);
+                calculateDurations(list[codedFrameOrderedIndex[i]], prevFrame);
                 prevFrame = list[codedFrameOrderedIndex[i]];
             }
         }
@@ -2675,11 +2692,11 @@ void Lookahead::slicetypeDecide()
     }
 }
 
-void Lookahead::calculateDurations(Frame *frame, Frame *prevFrame, int64_t concurrentDisplayDuration)
+void Lookahead::calculateDurations(Frame *frame, Frame *prevFrame)
 {
     frame->m_cpbDelay = m_cpbDelay;
     frame->m_dpbOutputDelay = frame->m_displayPicCount - m_codedPicCount;
-    frame->m_plannedCpbDuration = concurrentDisplayDuration;
+    frame->m_plannedCpbDuration = frame->m_duration;
     frame->m_codedPicCount = m_codedPicCount;
 
     /* largest re-ordering at highest temporal layer */
@@ -2690,7 +2707,8 @@ void Lookahead::calculateDurations(Frame *frame, Frame *prevFrame, int64_t concu
         frame->m_cpbDelay += frame->m_dpbOutputDelay;
         frame->m_dpbOutputDelay = 0;
 
-        // fix collisions with long sequences of doubling or tripling and reordering of bref
+        /* Bref and next B-frame cpbRemovalDelay can be equal on long sequence of doubling or tripling.
+        larger m_dpbOutputDelay margin would fix this, but it creates buffering delay and breaks UHD BD compliance */
         if (prevFrame && (prevFrame->m_cpbDelay == frame->m_cpbDelay))
         {
             prevFrame->m_cpbDelay -= 1;
@@ -2698,7 +2716,7 @@ void Lookahead::calculateDurations(Frame *frame, Frame *prevFrame, int64_t concu
         }
     }
 
-    /* HRD counters are reset after a Buffering Period SEI (attached with the keyframe) */
+    /* Buffering Period SEI (attached with the keyframe) */
     if (!m_param->bIntraRefresh && frame->m_lowres.bKeyframe)
     {
         m_cpbDelay = 0;
