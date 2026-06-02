@@ -3101,6 +3101,47 @@ int RateControl::updateVbv(int64_t bits, RateControlEntry* rce)
     return filler;
 }
 
+/* Keep ABR RC state live for lookahead-only frames (no actual encode). */
+void RateControl::rateControlLookaheadEnd(RateControlEntry* rce)
+{
+    /* Use ideal bits to avoid QP escalation from uncalibrated frameSizePlanned. */
+    int64_t bits = (int64_t)(m_bitrate / m_fps);
+    if (bits <= 0)
+        bits = 1;
+
+    rce->qpaRc    = rce->qpNoVbv;
+    rce->rowTotalBits = bits;
+
+    /* Update cplxrSum and totalBits. */
+    if (rce->qRceq > 0)
+    {
+        if (rce->sliceType != B_SLICE)
+            rce->rowCplxrSum = bits * x265_qp2qScale(rce->qpaRc) / rce->qRceq;
+        else
+            rce->rowCplxrSum = bits * x265_qp2qScale(rce->qpaRc) / (rce->qRceq * fabs(m_param->rc.pbFactor));
+        m_cplxrSum += rce->rowCplxrSum;
+    }
+    m_totalBits += bits;
+
+    /* Advance wantedBitsWindow. */
+    if (m_isAbr && !m_isAbrReset)
+    {
+        m_wantedBitsWindow += m_frameDuration * m_bitrate;
+        m_encodedBits      += bits;
+    }
+
+    /* Advance m_startEndOrder so next rateControlStart can proceed. */
+    if (m_param->rc.rateControlMode == X265_RC_ABR || m_isVbv)
+    {
+        m_startEndOrder.incr();
+        if (rce->encodeOrder < m_param->frameNumThreads - 1)
+            m_startEndOrder.incr();
+    }
+    m_startEndOrder.incr();
+
+    rce->isActive = false;
+}
+
 /* After encoding one frame, update rate control state */
 int RateControl::rateControlEnd(Frame* curFrame, int64_t bits, RateControlEntry* rce, int *filler)
 {

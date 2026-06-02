@@ -1933,6 +1933,8 @@ int Encoder::encodeLookaheadOnly(const x265_picture* pic_in , x265_picture* pic_
         m_rceSet = true;
     }
     int QP = m_rateControl->rateControlStart(decidedFrame, &m_rce, this);
+    if (m_param->rc.rateControlMode == X265_RC_ABR)
+        m_rateControl->rateControlLookaheadEnd(&m_rce);
 
     /* Decrement referenced frame reference counts to allow recycling,
        since we won't call compressFrame in encodeLookaheadOnly */
