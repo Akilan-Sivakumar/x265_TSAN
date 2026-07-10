@@ -387,7 +387,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
+      # On pull_request_target, check out the PR merged into master
+      # (refs/pull/N/merge) so PR changes are actually built and tested;
+      # plain pushes build their own commit.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
 
       - name: Cache ccache
         uses: actions/cache@v5
@@ -455,7 +461,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
+      # On pull_request_target, check out the PR merged into master
+      # (refs/pull/N/merge) so PR changes are actually built and tested;
+      # plain pushes build their own commit.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
 
       - name: Cache ccache
         uses: actions/cache@v5
@@ -514,7 +526,13 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     steps:
+      # On pull_request_target, check out the PR merged into master
+      # (refs/pull/N/merge) so PR changes are actually built and tested;
+      # plain pushes build their own commit.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
 
       - name: Cache ccache
         uses: actions/cache@v5
@@ -575,7 +593,13 @@ jobs:
     timeout-minutes: 45
     needs: [build-8bit, build-10bit, build-12bit]
     steps:
+      # On pull_request_target, check out the PR merged into master
+      # (refs/pull/N/merge) so PR changes are actually built and tested;
+      # plain pushes build their own commit.
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
 
       - name: Cache ccache
         uses: actions/cache@v5
@@ -665,6 +689,81 @@ jobs:
             build/multilib/8bit/x265
             build/multilib/8bit/libx265.so*
             build/multilib/8bit/libx265.a
+          retention-days: 3
+
+  build-tsan:
+    name: "Build TSAN"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      # On pull_request_target, check out the PR merged into master
+      # (refs/pull/N/merge) so PR changes are actually built and tested;
+      # plain pushes build their own commit.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request_target' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.sha }}
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: ccache-tsan-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-tsan-${{ runner.os }}-
+
+      - name: Cache apt packages
+        uses: actions/cache@v5
+        with:
+          path: /home/runner/apt-archives
+          key: apt-build-tsan-${{ runner.os }}-v1
+          restore-keys: apt-build-tsan-${{ runner.os }}-v1
+      - name: Pre-populate apt cache
+        run: sudo cp /home/runner/apt-archives/*.deb /var/cache/apt/archives/ 2>/dev/null || true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake nasm ccache libnuma-dev clang
+          clang --version
+
+      - name: Prepare apt cache
+        if: always()
+        run: |
+          mkdir -p /home/runner/apt-archives
+          cp -n /var/cache/apt/archives/*.deb /home/runner/apt-archives/ 2>/dev/null || true
+
+      - name: Build (TSAN instrumented)
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          mkdir -p build/tsan && cd build/tsan
+          cmake ../../source \
+            -DCMAKE_C_COMPILER=clang-18 \
+            -DCMAKE_CXX_COMPILER=clang++-18 \
+            -DCMAKE_C_FLAGS="-fsanitize=thread -g -O1" \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1" \
+            -DENABLE_SHARED=OFF
+          make -j$(nproc)
+          test -f x265 && echo "TSAN CLI binary OK"
+          ./x265 --version
+
+      - name: Verify TSAN instrumentation
+        run: |
+          # If ccache served a stale non-TSAN object set, or flags were
+          # dropped, the binary silently has no instrumentation and every
+          # test would report "Clean". Fail the build instead.
+          if nm build/tsan/x265 2>/dev/null | grep -q '__tsan_init' \
+             || strings build/tsan/x265 | grep -q 'ThreadSanitizer'; then
+            echo "[OK] Binary is TSAN-instrumented"
+          else
+            echo "::error::x265 binary is NOT TSAN-instrumented!"
+            exit 1
+          fi
+
+      - name: Upload CLI binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: x265-tsan
+          path: build/tsan/x265
           retention-days: 3
 
   # ───────────────────────────────────────────────────────────────────────────
@@ -1504,10 +1603,353 @@ jobs:
           path: summaries/*.log
           retention-days: 3
 
+  # Trusted job: the ONLY place ASSETS_TOKEN is referenced for TSAN videos.
+  # Never checks out or executes PR code; hands videos to test-tsan via an
+  # artifact so the job that runs the PR-built binary holds zero secrets.
+  # Cache is also written only here, closing the cache-poisoning path.
+  prepare-tsan-assets:
+    name: "Prepare TSAN Test Assets"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Cache TSAN test videos
+        id: cache-tsan-videos
+        uses: actions/cache@v5
+        with:
+          path: tsan-videos
+          key: tsan-videos-set-e-v2
+
+      - name: Download TSAN test videos (cache miss only)
+        if: steps.cache-tsan-videos.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p tsan-videos
+          REPO="${{ secrets.ASSETS_ORG_AND_REPO }}"
+          TAG="v4.1"
+          TOKEN="${{ secrets.ASSETS_TOKEN }}"
+          download_asset() {
+            local filename=$1
+            local dest=$2
+            echo "=== Downloading $filename ==="
+            ASSET_ID=$(curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+              | python3 -c "import sys, json; data = json.load(sys.stdin); asset = next((a for a in data['assets'] if a['name'] == '$filename'), None); print(asset['id'] if asset else '')")
+            if [ -z "$ASSET_ID" ]; then
+              echo "Asset '$filename' not found in release $TAG"
+              exit 1
+            fi
+            curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" \
+              -o "$dest/$filename"
+            echo "[OK] $filename downloaded"
+          }
+          download_asset "RaceHorses_416x240_30_10bit.yuv"     "tsan-videos"
+          download_asset "mobile_calendar_422_ntsc.y4m"        "tsan-videos"
+          download_asset "silent_cif_420.y4m"                  "tsan-videos"
+          download_asset "BasketballDrive_1920x1080_50.y4m"    "tsan-videos"
+          download_asset "RaceHorses_416x240_30.y4m"           "tsan-videos"
+
+      - name: Upload video bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: tsan-videos-${{ github.run_id }}
+          path: tsan-videos
+          retention-days: 1
+          overwrite: true
+
+  test-tsan:
+    name: "Test TSAN - Threading Race Detection"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs: [build-tsan, code-quality, prepare-tsan-assets]
+    # Run only when build-tsan passed AND code-quality passed. code-quality
+    # only exists on pull_request_target (skipped on push/dispatch), so
+    # 'skipped' is accepted to keep TSAN running on non-PR events.
+    if: |
+      always() &&
+      needs.build-tsan.result == 'success' &&
+      needs.prepare-tsan-assets.result == 'success' &&
+      (needs.code-quality.result == 'success' || needs.code-quality.result == 'skipped')
+    steps:
+      - name: Download TSAN binary
+        uses: actions/download-artifact@v8
+        with:
+          name: x265-tsan
+          path: dist
+
+      # Videos come pre-downloaded from the trusted prepare-tsan-assets job.
+      # No secrets are referenced anywhere in this job, because it executes
+      # the PR-built binary.
+      - name: Download TSAN video bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: tsan-videos-${{ github.run_id }}
+          path: tsan-videos
+
+      - name: Run TSAN regression tests
+        run: |
+          chmod +x dist/x265
+          X265=$(pwd)/dist/x265
+          VID=$(pwd)/tsan-videos
+          mkdir -p tsan-logs
+          # No log_path: TSAN reports go to stderr, interleaved with the
+          # encoder's own output — warnings appear mid-encode, between the
+          # frame progress lines, same as on a local terminal. The complete
+          # console output of each test (encoding log + TSAN warnings) is
+          # captured into ONE file under tsan-logs/, which is then analyzed
+          # for warnings and always uploaded as an artifact.
+          export TSAN_OPTIONS="halt_on_error=0:history_size=7"
+          echo "TSAN_OPTIONS=$TSAN_OPTIONS"
+          FAIL=0
+          > /tmp/tsan_results.log
+          run_tsan() {
+            local label="$1"; shift
+            local slug
+            slug=$(echo "$label" | tr ' /' '__')
+            local logfile="tsan-logs/${slug}.log"
+            echo ""
+            echo "=== $label — log: $logfile ==="
+            local start_ts=$SECONDS
+            # Full console output (stdout + stderr) streams to the Actions
+            # log AND into the per-test log file.
+            "$@" 2>&1 | tee "$logfile" || true
+            local rc=${PIPESTATUS[0]:-0}
+            echo "[debug] exit code: $rc (TSAN default is 66 when races were reported) | duration: $((SECONDS - start_ts))s"
+            # ── Analyze the captured console log ──
+            local n
+            n=$(grep -c "WARNING: ThreadSanitizer" "$logfile" || true)
+            n=${n:-0}
+            if [ "$n" -gt 0 ]; then
+              echo "[TSAN] !! RESULT $label: RACE DETECTED ($n warnings)"
+              echo "[TSAN] Unique race sites (count | summary):"
+              grep "SUMMARY: ThreadSanitizer" "$logfile" | sort | uniq -c | sort -rn || true
+              echo "| \`$label\` | RACE DETECTED ($n warnings) |" >> /tmp/tsan_results.log
+              FAIL=$((FAIL+1))
+            else
+              echo "[TSAN] RESULT $label: clean"
+              echo "| \`$label\` | Clean |" >> /tmp/tsan_results.log
+            fi
+          }
+          # ── 4 low-res + 1 high-res (BasketballDrive) ──
+          run_tsan "ultrafast RaceHorses_10bit" \
+            $X265 --preset ultrafast --tune psnr --limit-refs 1 --no-info --hash=1 --psnr --ssim \
+                  --input-res=416x240 --input-depth=10 --input-csp=i420 --fps=30 --csv /tmp/out1.csv \
+                  -o /tmp/out1.hevc "$VID/RaceHorses_416x240_30_10bit.yuv"
+          run_tsan "superfast mobile_calendar" \
+            $X265 --preset superfast --weightp --no-info --hash=1 --psnr --ssim --log-level=full --csv /tmp/out2.csv \
+                  -o /tmp/out2.hevc "$VID/mobile_calendar_422_ntsc.y4m"
+          run_tsan "medium silent_cif" \
+            $X265 --preset medium --me full --rect --amp --no-info --hash=1 --psnr --ssim --csv /tmp/out3.csv \
+                  -o /tmp/out3.hevc "$VID/silent_cif_420.y4m"
+          run_tsan "slow BasketballDrive" \
+            $X265 --preset slow --nr-intra 100 -F4 --aq-strength 3 --qg-size 16 --limit-refs 1 \
+                  --no-info --hash=1 --psnr --ssim --csv /tmp/out4.csv \
+                  -o /tmp/out4.hevc "$VID/BasketballDrive_1920x1080_50.y4m"
+          run_tsan "veryslow RaceHorses" \
+            $X265 --preset veryslow --tskip-fast --tskip --limit-refs 3 --limit-tu 3 \
+                  --no-info --hash=1 --psnr --ssim --csv /tmp/out5.csv \
+                  -o /tmp/out5.hevc "$VID/RaceHorses_416x240_30.y4m"
+          rm -f /tmp/out*.hevc /tmp/out*.csv
+          echo ""
+          echo "=== Captured console logs ==="
+          ls -la tsan-logs/ || true
+          total_warnings=$(cat tsan-logs/*.log 2>/dev/null | grep -c "WARNING: ThreadSanitizer" || true)
+          echo "Total TSAN warnings across all logs: ${total_warnings:-0}"
+          echo ""
+          echo "=== Unique race sites across all logs ==="
+          grep -h "SUMMARY: ThreadSanitizer" tsan-logs/*.log 2>/dev/null | sort | uniq -c | sort -rn || true
+          echo ""
+          echo "=== TSAN Results FAIL=$FAIL ==="
+          mkdir -p summaries && cp /tmp/tsan_results.log summaries/tsan.log 2>/dev/null || true
+          test $FAIL -eq 0
+
+      - name: Write step summary
+        if: always()
+        run: |
+          {
+            echo "## TSAN — Threading Race Detection"
+            echo ""
+            echo "> Runner: $(nproc) cores · AVX-512: $(grep -qm1 avx512f /proc/cpuinfo && echo yes || echo no)"
+            echo ""
+            echo "| Test | Result |"
+            echo "|------|:------:|"
+            if [ -f /tmp/tsan_results.log ] && [ -s /tmp/tsan_results.log ]; then
+              cat /tmp/tsan_results.log
+            else
+              echo "| _no data_ | - |"
+            fi
+            echo ""
+            if ls tsan-logs/*.log >/dev/null 2>&1; then
+              sites=$(grep -h "SUMMARY: ThreadSanitizer" tsan-logs/*.log 2>/dev/null | sort | uniq -c | sort -rn || true)
+              if [ -n "$sites" ]; then
+                echo "<details><summary>Unique race sites</summary>"
+                echo ""
+                echo '```'
+                echo "$sites"
+                echo '```'
+                echo ""
+                echo "</details>"
+                echo ""
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Always store the full console logs (encoding output + interleaved
+      # TSAN warnings), pass or fail.
+      - name: Upload console logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: tsan-console-logs
+          path: tsan-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload summaries
+        if: always() && github.event_name != 'pull_request_target'
+        uses: actions/upload-artifact@v7
+        with:
+          name: summaries-tsan
+          path: summaries/*.log
+          retention-days: 3
+
+  # Trusted jobs: the ONLY places HARNESS_REPO_URL / ASSETS_TOKEN are
+  # referenced for smoke tests. They never check out or execute PR code;
+  # everything is handed to the smoke matrices via artifacts, so the jobs
+  # that build and run PR code hold zero secrets.
+  prepare-smoke-assets-linux:
+    name: "Prepare Smoke Assets (Linux)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    timeout-minutes: 20
+    steps:
+      - name: "Clone test-harness"
+        run: |
+          git clone ${{ secrets.HARNESS_REPO_URL }} harness
+          # Strip embedded credentials from .git/config before this bundle is
+          # handed to jobs that execute PR code
+          git -C harness remote set-url origin "$(git -C harness remote get-url origin | sed -E 's#https://[^@]+@#https://#')"
+          echo "[OK] test-harness cloned, credential scrubbed"
+
+      - name: "Download and extract assets"
+        run: |
+          mkdir -p assets/videos assets/goldens assets/decoders assets/conf assets/smoke-tests
+          REPO="${{ secrets.ASSETS_ORG_AND_REPO }}"
+          TAG="v4.2"
+          TOKEN="${{ secrets.ASSETS_TOKEN }}"
+          download_asset() {
+            local filename=$1
+            local dest=$2
+            echo "=== Downloading $filename ==="
+            ASSET_ID=$(curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+              | python3 -c "import sys, json; data = json.load(sys.stdin); asset = next((a for a in data['assets'] if a['name'] == '$filename'), None); print(asset['id'] if asset else '')")
+            if [ -z "$ASSET_ID" ]; then
+              echo "Asset '$filename' not found in release $TAG"
+              exit 1
+            fi
+            curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" \
+              | tar -xz -C "$dest"
+            echo "[OK] $filename extracted"
+          }
+          download_asset "videos.tar.gz"         "assets/videos"
+          download_asset "goldens-linux.tar.gz"  "assets/goldens"
+          download_asset "decoders-linux.tar.gz" "assets/decoders"
+          download_asset "conf.tar.gz"           "assets/conf"
+          download_asset "smoke-tests.tar.gz"    "assets/smoke-tests"
+
+      - name: "Upload harness bundle"
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-harness-linux-${{ github.run_id }}
+          path: harness
+          include-hidden-files: true
+          retention-days: 1
+          overwrite: true
+
+      - name: "Upload assets bundle"
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-assets-linux-${{ github.run_id }}
+          path: assets
+          retention-days: 1
+          overwrite: true
+
+  prepare-smoke-assets-windows:
+    name: "Prepare Smoke Assets (Windows)"
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request_target'
+    timeout-minutes: 20
+    steps:
+      - name: "Clone test-harness"
+        run: |
+          git clone ${{ secrets.HARNESS_REPO_URL }} harness
+          # Strip embedded credentials from .git/config before this bundle is
+          # handed to jobs that execute PR code
+          git -C harness remote set-url origin "$(git -C harness remote get-url origin | sed -E 's#https://[^@]+@#https://#')"
+          echo "[OK] test-harness cloned, credential scrubbed"
+
+      - name: "Download and extract assets"
+        run: |
+          mkdir -p assets/videos assets/goldens assets/decoders assets/conf assets/smoke-tests
+          REPO="${{ secrets.ASSETS_ORG_AND_REPO }}"
+          TAG="v4.2"
+          TOKEN="${{ secrets.ASSETS_TOKEN }}"
+          download_asset() {
+            local filename=$1
+            local dest=$2
+            echo "=== Downloading $filename ==="
+            ASSET_ID=$(curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
+              | python3 -c "import sys, json; data = json.load(sys.stdin); asset = next((a for a in data['assets'] if a['name'] == '$filename'), None); print(asset['id'] if asset else '')")
+            if [ -z "$ASSET_ID" ]; then
+              echo "Asset '$filename' not found in release $TAG"
+              exit 1
+            fi
+            curl -fsSL \
+              -H "Authorization: token $TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" \
+              | tar -xz -C "$dest"
+            echo "[OK] $filename extracted"
+          }
+          download_asset "videos.tar.gz"           "assets/videos"
+          download_asset "goldens-windows.tar.gz"  "assets/goldens"
+          download_asset "decoders-windows.tar.gz" "assets/decoders"
+          download_asset "conf.tar.gz"             "assets/conf"
+          download_asset "smoke-tests.tar.gz"      "assets/smoke-tests"
+
+      - name: "Upload harness bundle"
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-harness-windows-${{ github.run_id }}
+          path: harness
+          include-hidden-files: true
+          retention-days: 1
+          overwrite: true
+
+      - name: "Upload assets bundle"
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-assets-windows-${{ github.run_id }}
+          path: assets
+          retention-days: 1
+          overwrite: true
+
   smoke-linux:
     name: "Smoke - Linux (${{ matrix.build }})"
     runs-on: ubuntu-latest
-    needs: [code-quality]
+    needs: [code-quality, prepare-smoke-assets-linux]
     if: github.event_name == 'pull_request_target'
     timeout-minutes: 60
     strategy:
@@ -1536,50 +1978,39 @@ jobs:
     steps:
       - name: "Create directories"
         run: |
-          mkdir -p "$TEST_SEQ_DIR" "$SMOKE_DIR" "$GOLDEN_DIR" "$TEMP_DIR" "$COREDUMP_DIR"
+          mkdir -p "$TEST_SEQ_DIR" "$SMOKE_DIR" "$GOLDEN_DIR" "$TEMP_DIR" "$COREDUMP_DIR" "$HARNESS_DIR"
           echo "[OK] All directories created"
 
-      - name: "Clone test-harness"
+      # Harness and assets come pre-fetched from the trusted
+      # prepare-smoke-assets-linux job. No secrets are referenced anywhere in
+      # this job, because it builds and runs PR code.
+      - name: "Download harness bundle"
+        uses: actions/download-artifact@v8
+        with:
+          name: smoke-harness-linux-${{ github.run_id }}
+          path: harness-tmp
+
+      - name: "Download assets bundle"
+        uses: actions/download-artifact@v8
+        with:
+          name: smoke-assets-linux-${{ github.run_id }}
+          path: assets-tmp
+
+      - name: "Place harness and assets"
         run: |
-          git clone ${{ secrets.HARNESS_REPO_URL }} "$HARNESS_DIR"
-          echo "[OK] test-harness cloned"
+          cp -a harness-tmp/.            "$HARNESS_DIR"/
+          cp -a assets-tmp/videos/.      "$TEST_SEQ_DIR"/
+          cp -a assets-tmp/goldens/.     "$GOLDEN_DIR"/
+          cp -a assets-tmp/decoders/.    "$TEST_SEQ_DIR"/
+          cp -a assets-tmp/conf/.        "$SMOKE_DIR"/
+          cp -a assets-tmp/smoke-tests/. "$SMOKE_DIR"/
+          chmod +x "$DECODER_PATH"
+          echo "[OK] harness and assets in place"
 
       - name: "Clone x265"
         run: |
           git clone ${{ github.event.pull_request.base.repo.clone_url }} "$X265_DIR"
           echo "[OK] x265 cloned"
-
-      - name: "Download and extract assets"
-        run: |
-          REPO="${{ secrets.ASSETS_ORG_AND_REPO }}"
-          TAG="v4.2"
-          TOKEN="${{ secrets.ASSETS_TOKEN }}"
-          download_asset() {
-            local filename=$1
-            local dest=$2
-            echo "=== Downloading $filename ==="
-            ASSET_ID=$(curl -fsSL \
-              -H "Authorization: token $TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-              | python3 -c "import sys, json; data = json.load(sys.stdin); asset = next((a for a in data['assets'] if a['name'] == '$filename'), None); print(asset['id'] if asset else '')")
-            if [ -z "$ASSET_ID" ]; then
-              echo "Asset '$filename' not found in release $TAG"
-              exit 1
-            fi
-            curl -fsSL \
-              -H "Authorization: token $TOKEN" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" \
-              | tar -xz -C "$dest"
-            echo "[OK] $filename extracted"
-          }
-          download_asset "videos.tar.gz"         "$TEST_SEQ_DIR"
-          download_asset "goldens-linux.tar.gz"  "$GOLDEN_DIR"
-          download_asset "decoders-linux.tar.gz" "$TEST_SEQ_DIR"
-          download_asset "conf.tar.gz"           "$SMOKE_DIR"
-          download_asset "smoke-tests.tar.gz"    "$SMOKE_DIR"
-          chmod +x "$DECODER_PATH"
 
       - name: "Copy and configure conf.py into test-harness"
         run: |
@@ -1637,7 +2068,7 @@ jobs:
   smoke-windows:
     name: "Smoke - Windows (${{ matrix.build }})"
     runs-on: windows-2022
-    needs: [code-quality]
+    needs: [code-quality, prepare-smoke-assets-windows]
     if: github.event_name == 'pull_request_target'
     timeout-minutes: 60
     defaults:
@@ -1669,50 +2100,40 @@ jobs:
     steps:
       - name: "Create directories"
         run: |
-          mkdir -p "$TEST_SEQ_DIR" "$SMOKE_DIR" "$GOLDEN_DIR" "$TEMP_DIR" "$COREDUMP_DIR"
+          mkdir -p "$(cygpath -u "$TEST_SEQ_DIR")" "$(cygpath -u "$SMOKE_DIR")" \
+                   "$(cygpath -u "$GOLDEN_DIR")" "$(cygpath -u "$TEMP_DIR")" \
+                   "$(cygpath -u "$COREDUMP_DIR")" "$(cygpath -u "$HARNESS_DIR")"
           echo "[OK] All directories created"
 
-      - name: "Clone test-harness"
+      # Harness and assets come pre-fetched from the trusted
+      # prepare-smoke-assets-windows job. No secrets are referenced anywhere
+      # in this job, because it builds and runs PR code.
+      - name: "Download harness bundle"
+        uses: actions/download-artifact@v8
+        with:
+          name: smoke-harness-windows-${{ github.run_id }}
+          path: harness-tmp
+
+      - name: "Download assets bundle"
+        uses: actions/download-artifact@v8
+        with:
+          name: smoke-assets-windows-${{ github.run_id }}
+          path: assets-tmp
+
+      - name: "Place harness and assets"
         run: |
-          git clone ${{ secrets.HARNESS_REPO_URL }} "$HARNESS_DIR"
-          echo "[OK] test-harness cloned"
+          cp -a harness-tmp/.            "$(cygpath -u "$HARNESS_DIR")"/
+          cp -a assets-tmp/videos/.      "$(cygpath -u "$TEST_SEQ_DIR")"/
+          cp -a assets-tmp/goldens/.     "$(cygpath -u "$GOLDEN_DIR")"/
+          cp -a assets-tmp/decoders/.    "$(cygpath -u "$TEST_SEQ_DIR")"/
+          cp -a assets-tmp/conf/.        "$(cygpath -u "$SMOKE_DIR")"/
+          cp -a assets-tmp/smoke-tests/. "$(cygpath -u "$SMOKE_DIR")"/
+          echo "[OK] harness and assets in place"
 
       - name: "Clone x265"
         run: |
           git clone ${{ github.event.pull_request.base.repo.clone_url }} "$X265_DIR"
           echo "[OK] x265 cloned"
-
-      - name: "Download and extract assets"
-        run: |
-          REPO="${{ secrets.ASSETS_ORG_AND_REPO }}"
-          TAG="v4.2"
-          TOKEN="${{ secrets.ASSETS_TOKEN }}"
-          download_asset() {
-            local filename=$1
-            local dest=$2
-            dest=$(cygpath -u "$2")
-            echo "=== Downloading $filename ==="
-            ASSET_ID=$(curl -fsSL \
-              -H "Authorization: token $TOKEN" \
-              -H "Accept: application/vnd.github.v3+json" \
-              "https://api.github.com/repos/$REPO/releases/tags/$TAG" \
-              | python3 -c "import sys, json; data = json.load(sys.stdin); asset = next((a for a in data['assets'] if a['name'] == '$filename'), None); print(asset['id'] if asset else '')")
-            if [ -z "$ASSET_ID" ]; then
-              echo "Asset '$filename' not found in release $TAG"
-              exit 1
-            fi
-            curl -fsSL \
-              -H "Authorization: token $TOKEN" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/$REPO/releases/assets/$ASSET_ID" \
-              | tar -xz -C "$dest"
-            echo "[OK] $filename extracted"
-          }
-          download_asset "videos.tar.gz"           "$TEST_SEQ_DIR"
-          download_asset "goldens-windows.tar.gz"  "$GOLDEN_DIR"
-          download_asset "decoders-windows.tar.gz" "$TEST_SEQ_DIR"
-          download_asset "conf.tar.gz"             "$SMOKE_DIR"
-          download_asset "smoke-tests.tar.gz"      "$SMOKE_DIR"
 
       - name: "Find vcvarsall.bat"
         run: |
@@ -1844,6 +2265,7 @@ jobs:
       - test-video-and-validation
       - test-threading
       - test-10bit-12bit-encoding
+      - test-tsan
     steps:
       - name: Download all summaries
         uses: actions/download-artifact@v8
@@ -1967,6 +2389,16 @@ jobs:
             w ""
           done
 
+          # ── TSAN section (separate — pass/fail, not performance data) ──
+          if [ -f summaries/tsan.log ] && [ -s summaries/tsan.log ]; then
+            w "### Threading Race Detection (TSAN)"
+            w ""
+            w "| Test | Result |"
+            w "|------|:------:|"
+            cat summaries/tsan.log | tee -a "$GITHUB_STEP_SUMMARY"
+            w ""
+          fi
+
           # ── Console-only plain-text summary ──
           echo ""
           echo "================================================================"
@@ -1993,6 +2425,7 @@ jobs:
       - test-video-and-validation
       - test-threading
       - test-10bit-12bit-encoding
+      - test-tsan
     if: always() && (github.event_name == 'pull_request_target')
 
     steps:
@@ -2018,6 +2451,7 @@ jobs:
           echo "  Test Video    : ${{ needs.test-video-and-validation.result }}"
           echo "  Test Threading: ${{ needs.test-threading.result }}"
           echo "  Test 10/12bit : ${{ needs.test-10bit-12bit-encoding.result }}"
+          echo "  Test TSAN     : ${{ needs.test-tsan.result }}"
           echo "================================================"
           ALL_PASS=true
           [[ "${{ needs.code-quality.result }}"            != "success" ]] && ALL_PASS=false && echo "   -> Code quality gate failed"
@@ -2034,6 +2468,7 @@ jobs:
           [[ "${{ needs.test-video-and-validation.result }}" != "success" ]] && ALL_PASS=false && echo "   -> Video & validation test failed"
           [[ "${{ needs.test-threading.result }}"          != "success" ]] && ALL_PASS=false && echo "   -> Threading test failed"
           [[ "${{ needs.test-10bit-12bit-encoding.result }}" != "success" ]] && ALL_PASS=false && echo "   -> 10/12-bit encoding test failed"
+          [[ "${{ needs.test-tsan.result }}"               != "success" ]] && ALL_PASS=false && echo "   -> TSAN race detection failed - check tsan-console-logs artifact"
           if $ALL_PASS; then
             echo "[OK] ALL CHECKS PASSED - READY TO MERGE"
           else
